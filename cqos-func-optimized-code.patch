@@ -1,0 +1,719 @@
+diff -Nuar manproc-0.0.1/manproc manproc-0.0.1-diff/manproc
+--- manproc-0.0.1/manproc	2025-06-16 14:19:26.000000000 +0800
++++ manproc-0.0.1-diff/manproc	2025-06-20 17:01:55.409102414 +0800
+@@ -1,43 +1,119 @@
+ #!/bin/bash
++#===============================================================================
++# 脚本名称：rpm-manual-processor
++# 功能描述：处理RPM包的中文手册页，包括克隆、提取、打补丁、编译和上传
++# 支持操作：clone, extract, patch, compile, upload
++#===============================================================================
++
++# 启用错误处理
++set -euo pipefail
++
++#------------------------------ 配置选项 ------------------------------#
++# 颜色定义
++RED='\033[0;31m'
++GREEN='\033[0;32m'
++YELLOW='\033[0;33m'
++BLUE='\033[0;34m'
++NC='\033[0m' # 恢复默认颜色
++
++#------------------------------ 日志函数 ------------------------------#
++log_info() {
++    echo -e "${GREEN}[INFO]${NC} $1"
++}
++
++log_warn() {
++    echo -e "${YELLOW}[WARN]${NC} $1"
++}
++
++log_error() {
++    echo -e "${RED}[ERROR]${NC} $1" >&2
++    exit 1
++}
++
++log_action() {
++    echo -e "${BLUE}[ACTION]${NC} $1"
++}
+ 
+-# 显示帮助信息
++#------------------------------ 帮助信息 ------------------------------#
+ show_help() {
+-    echo "用法: $0 [选项] <PKG_PATH>"
+-    echo "PKG_PATH 是BUILD目录的上一级目录"
+-    echo "选项:"
+-    echo "  -cl,--clone        克隆" 
+-    echo "  -e, --extract      从/usr/share/man中提取并解压man文件"
+-    echo "  -p, --patch        生成补丁并修改SPEC文件"
+-    echo "  -co,--compile      编译"
+-    echo "  -u, --upload       上传"
+-    echo "  -h, --help         显示此帮助信息"
+-    echo "具体使用如下:"
+-    echo "步骤1: 克隆包"
+-    echo "  $0 package -cl"
+-    echo "---------------------------------------"
+-    echo "步骤2: 解压 man 文件到 SOURCES/man 目录"
+-    echo "  $0 package -e"
+-    echo "---------------------------------------"
+-    echo "步骤3: 翻译man文件并更新README.md"
+-    echo "---------------------------------------"
+-    echo "步骤4: 生成补丁并修改SPEC文件"
+-    echo "  $0 package -p"
+-    echo "---------------------------------------"
+-    echo "步骤5: 编译"
+-    echo "  $0 package -co"
+-    echo "---------------------------------------"
+-    echo "步骤6: 上传"
+-    echo "  $0 package -u"
+-    echo "---------------------------------------"
+-    echo "!!!注意：如果只写包名，需要此包在当前文件夹下"
++    echo -e "${BLUE}RPM包中文手册处理工具${NC}"
++    echo
++    echo -e "${YELLOW}功能说明：${NC}"
++    echo -e "  ${GREEN}•${NC} 处理RPM包的中文手册页，包括克隆、提取、打补丁、编译和上传"
++    echo -e "  ${GREEN}•${NC} 支持以下操作模式："
++    echo "    clone:      克隆代码仓库"
++    echo "    extract:    从系统中提取并解压man文件"
++    echo "    patch:      生成补丁并修改SPEC文件"
++    echo "    compile:    编译RPM包"
++    echo "    upload:     上传代码和RPM包"
++    echo
++    echo -e "${YELLOW}使用语法：${NC}"
++    echo "  $(basename "$0") [选项] <PKG_PATH>"
++    echo
++    echo -e "${YELLOW}选项：${NC}"
++    echo -e "  ${GREEN}-cl, --clone${NC}        克隆代码仓库"
++    echo -e "  ${GREEN}-e,  --extract${NC}      提取并解压man文件"
++    echo -e "  ${GREEN}-p,  --patch${NC}        生成补丁并修改SPEC文件"
++    echo -e "  ${GREEN}-co, --compile${NC}      编译RPM包"
++    echo -e "  ${GREEN}-u,  --upload${NC}       上传代码和RPM包"
++    echo -e "  ${GREEN}-h,  --help${NC}         显示此帮助信息"
++    echo
++    echo -e "${YELLOW}示例:${NC}${RED}（按以下步骤进行）${NC}"
++    echo "  步骤1:$(basename "$0") package -cl    # 克隆包"
++    echo "  步骤2:$(basename "$0") package -e     # 提取man文件"
++    echo "  步骤3: 翻译man文件并更新README.md"
++    echo "  步骤4:$(basename "$0") package -p     # 生成补丁并修改SPEC"
++    echo "  步骤5:$(basename "$0") package -co    # 编译RPM包"
++    echo "  步骤6:$(basename "$0") package -u     # 上传结果"
++    exit 0
+ }
+ 
++interrupt() {
++    case "$ACTION" in
++        clone)
++            log_action "\n收到中断信号，正在结束 clone 操作..."
++            [ -d "$PKG_PATH" ] && rm -rf "$PKG_PATH" && log_info "已清理包路径：$PKG_PATH"
++            ;;
++        extract)
++            log_action "\n收到中断信号，正在结束 extract 操作..."
++            [ -f "$NEW_SPEC_FILE" ] && rm -rf "$NEW_SPEC_FILE" && log_info "已清理展开宏的spec文件：$NEW_SPEC_FILE"
++            [ -d "$MAN_TMP_PATH" ] && rm -rf "$MAN_TMP_PATH" && log_info "已清理man手册路径：$MAN_TMP_PATH"
++            ;;
++        patch)
++            log_action "\n收到中断信号，正在结束 patch 操作..."
++            [ -d "$src_diff_path" ] && rm -rf "$src_diff_path" && log_info "已清理用于生成patch的源码包路径：$src_diff_path"
++            [ -f "$patch_path" ] && rm -rf "$patch_path" && log_info "已清理patch文件：$patch_path"
++            mv -f "$SPEC_FILE_BAK" "$SPEC_FILE" && log_info "已恢复spec文件：$SPEC_FILE"
++            if [ -d "$MAN_TMP_PATH" ]; then
++                rm -rf "$MAN_TMP_PATH"
++            fi
++            mv -f "$MAN_TMP_PATH_BAK" "$MAN_TMP_PATH" && log_info "已恢复man手册路径：$MAN_TMP_PATH"
++            ;;
++        compile)
++            log_action "\n收到中断信号，正在结束 compile 操作..."
++            ;;
++        upload)
++            log_action "\n收到中断信号，正在结束 upload 操作..."
++            cd "$PKG_PATH"
++            git log -2 | grep $commit_msg_init &> /dev/null
++            if [ $? -eq 0 ]; then
++                hash=$(git log -2 --pretty=format:"%H" | tail -n 1)
++                git reset $hash
++            fi
++            ;;
++    esac
++    exit 0
++}
++trap interrupt SIGINT
++
+ # 克隆代码
+ clone() {
+-    local branch=$(read -p "请输入克隆分支（默认master）: " && [[ -n "$REPLY" ]] && echo "$REPLY" || echo "master")
+-    echo "$branch"
++    # -e 启用输入编辑功能、-r 禁用反斜杠转义、-s 隐藏输入内容
++    local branch=$(read -e -p "请输入克隆分支（默认master）: " && [[ -n "$REPLY" ]] && echo "$REPLY" || echo "master")
++    log_info "使用分支: $branch"
++    
+     # CQ内部仓库列表（按优先级排序）
+-    cq_repos=(
++    local cq_repos=(
+         "http://192.168.10.152/cyos-security/public/$PKG.git"
+         "http://192.168.10.152/cyos-security/protected/$PKG.git"
+         "http://192.168.10.152/cyos-security/private/$PKG.git"
+@@ -51,14 +127,24 @@
+         "http://192.168.10.152/cyos-security/transition/$PKG.git"
+         "http://192.168.10.152/lixuebing/$PKG.git"
+     )
+-    echo "开始克隆项目到: $PKG_PATH"
++    
++    log_action "开始克隆项目到: $PKG_PATH"
+     rm -rf "$PKG_PATH"
+-
++    
++    local repo_found=false
+     for repo in "${cq_repos[@]}"; do
+         # 检查仓库是否存在
+-        git ls-remote $repo &>/dev/null && git clone -b "$branch" "$repo" && break
++        if git ls-remote $repo &>/dev/null; then
++            git clone -b "$branch" "$repo"
++            repo_found=true
++            break
++        fi
+     done
+-
++    
++    if ! $repo_found; then
++        log_error "未找到任何可用的仓库"
++    fi
++    
+     if [ ! -f "$PKG_PATH/.gitignore" ] && [ -d "$SPECS_DIR" ]; then
+         cat > $PKG_PATH/.gitignore << EOF
+ #rpm
+@@ -68,8 +154,10 @@
+ #vscode
+ .vscode 
+ EOF
++        log_info "创建.gitignore文件"
+     fi
+-    echo "克隆完成（分支:$branch）"
++    
++    log_info "克隆完成（分支:$branch）"
+ }
+ 
+ # 从 %files 行中提取包名称
+@@ -95,7 +183,7 @@
+ 
+ # 函数：检查SPEC文件中含有man手册的包
+ install_man_pkgs_and_get_paths() {
+-    echo "正在检查 ${SPEC_FILE##*/} 文件中 %files 区域是否包含 man 页面..."
++    log_info "正在检查 ${SPEC_FILE##*/} 文件中 %files 区域是否包含 man 页面..."
+     
+     # 展开 spec 文件中的宏定义（目的：方便获取子包名）
+     rpmspec -P $SPEC_FILE > $NEW_SPEC_FILE
+@@ -103,18 +191,26 @@
+     local main_pkg=("$(grep '^Name:' "$NEW_SPEC_FILE" | sed 's/^Name:\s*//')")
+ 
+     # spec 文件中 %files 行信息（用于查询含有man手册的包）
+-    local files_messages=""
++    local -a files_messages
+     readarray -t files_messages < <(grep '^%files' "$NEW_SPEC_FILE")
+ 
+     # 含man手册包名数组
+-    local man_page_pkgs=""
++    local -a man_page_pkgs
++
++    local section_count=${#files_messages[@]}
+ 
+     # 遍历每个%files区域（除了最后一个）
+     for ((i=0; i<${#files_messages[@]}; i++)); do
+         local current="${files_messages[$i]}"
+-        local next="${i} < $((section_count-1)) ? ${files_sections[i+1]} : '^%changelog'}"
+ 
+-        result=$(awk -v current_pattern="$current" -v next_pattern="$next" '
++        local next=""
++        if [[ $i -lt $((section_count-1)) ]]; then
++            next="${files_messages[$i+1]}"
++        else
++            next="^%changelog"
++        fi
++
++        local result=$(awk -v current_pattern="$current" -v next_pattern="$next" '
+             $0 == current_pattern { flag = 1; next }
+             $0 == next_pattern { flag = 0; exit }
+             flag && $0 ~ /^\/usr\/share\/man\// { print; exit }
+@@ -127,7 +223,14 @@
+     
+     for man_page_pkg in "${man_page_pkgs[@]}"; do
+         if [ -n "$man_page_pkg" ]; then
+-            dnf install -y $man_page_pkg &> /dev/null || exit 1
++            log_info "正在安装 $man_page_pkg 包..."
++            if dnf install -y $man_page_pkg > tmp.txt; then
++                log_info "包 $man_page_pkg 安装成功"
++            else
++                log_warn "安装 $man_page_pkg 失败，查看失败原因如下："
++                cat tmp.txt
++            fi
++            rm -f tmp.txt
+             man_file_paths+=($(rpm -ql "$man_page_pkg" | grep -E "/usr/share/man"))
+         fi
+     done
+@@ -137,10 +240,10 @@
+ process_man_files() {
+     install_man_pkgs_and_get_paths
+ 
+-    [[ ${#man_file_paths[@]} -eq 0 ]] && {
+-        echo "警告：未找到任何man手册文件"
++    if [[ ${#man_file_paths[@]} -eq 0 ]]; then
++        log_warn "警告：未找到任何man手册文件"
+         return 1
+-    }
++    fi
+ 
+     # 创建man手册临时存放路径
+     mkdir -p "$MAN_TMP_PATH"
+@@ -149,63 +252,78 @@
+         local man_file_gz=$(basename "$man_file_path")
+         local man_file="${man_file_gz%.gz}"
+         
+-        echo "正在处理 $man_file_path..."
++        log_info "正在处理 $man_file_path..."
+         
+         # 复制到 MAN_TMP_PATH 目录
+-        cp "$man_file_path" "$MAN_TMP_PATH" || {
+-            echo "警告: 无法复制 $man_file_path 到 $MAN_TMP_PATH"
++        if ! cp "$man_file_path" "$MAN_TMP_PATH"; then
++            log_warn "警告: 无法复制 $man_file_path 到 $MAN_TMP_PATH"
+             continue
+-        }
++        fi
+         
+         # 解压文件
+         cd "$MAN_TMP_PATH" && gunzip "$man_file_gz" &> /dev/null
+-        [[ $? -eq 0 ]] && echo "✓ 解压完成: $man_file" || echo "× 解压失败: $man_file_gz"
++        if [[ $? -eq 0 ]]; then
++            log_info "✓ 解压完成: $man_file"
++        else
++            log_warn "× 解压失败: $man_file_gz"
++        fi
+     done
+     
+-    echo "共处理${#man_file_paths[@]}个man文件"
++    log_info "共处理${#man_file_paths[@]}个man文件"
+ }
+ 
+ # 函数：生成补丁并修改SPEC文件
+ generate_patch_and_modify_spec() {
++    SPEC_FILE_BAK=$SPEC_FILE.bak
++    cp -f "$SPEC_FILE" "$SPEC_FILE_BAK"
++    MAN_TMP_PATH_BAK=$MAN_TMP_PATH.bak
++    cp -rf "$MAN_TMP_PATH" "$MAN_TMP_PATH_BAK"
+     ############################## 生成补丁 ##############################
+-    echo "正在生成补丁..."
+-
+-    # 获取源码路径
+-    local src_path=$(grep '^Source0:' "$NEW_SPEC_FILE" | sed 's/^Source0:\s*//')
+-    
+-    # 获取压缩源码文件名称
+-    local src_name_gz=$(basename "$src_path")
+-    ls $SOURCES_DIR/$src_name_gz &> /dev/null || {
+-        echo "正在下载源码: $src_name_gz ..."
+-        wget $src_path -P $SOURCES_DIR &> /dev/null
+-    }
+-    
+-    # 解压源码
+-    rpmbuild -bp -D "_topdir $PKG_PATH" "$SPEC_FILE"
++    log_action "正在生成补丁..."
+ 
+     # 获取源码名（从BUILD目录内容推断）
+-    src_name=$(ls "$BUILD_DIR" 2>/dev/null | head -n 1)
++    local src_name=$(ls "$BUILD_DIR" 2>/dev/null | head -n 1)
+     if [ -z "$src_name" ]; then
+-        echo "错误: 未找到BUILD目录下的源文件"
+-        exit 1
++        log_info "未找到BUILD目录下的源文件"
++        # 获取源码路径
++        local src_url=$(grep '^Source0:' "$NEW_SPEC_FILE" | sed 's/^Source0:\s*//')
++        
++        # 获取压缩源码文件名称
++        local src_name_gz=$(basename "$src_url")
++        if ! ls $SOURCES_DIR/$src_name_gz &> /dev/null; then
++            log_info "正在下载源码: $src_name_gz ..."
++            if ! wget $src_url -P $SOURCES_DIR &> /dev/null; then
++                log_error "下载源码失败: $src_name_gz"
++            fi
++        fi
++        
++        if ! yum builddep -y "$SPEC_FILE" > tmp.txt; then
++            cat tmp.txt
++            log_error "安装依赖失败，请查看以上信息"
++        fi
++        rm tmp.txt
++
++        # 解压源码
++        log_info "正在解压源码..."
++        rpmbuild -bp -D "_topdir $PKG_PATH" "$SPEC_FILE"
+     fi
+     
+     # 获取包名（从源码名中获取，去掉版本号）
+     local pkg_name=$(echo "$src_name" | cut -d '-' -f 1)
+-    src_path=$(ls -d "$BUILD_DIR/$src_name")
+-    echo "处理源码目录: $src_path"
++    local src_path=$(ls -d "$BUILD_DIR/$src_name")
++    log_info "处理源码目录: $src_path"
+ 
+     # 创建打补丁所需目录
+-    local src_diff_path="$src_path-diff"
++    src_diff_path="$src_path-diff"
+     mkdir -p "$src_diff_path"
+     cp -rf $src_path/* $src_diff_path/
+ 
+     # 移动中文手册页
+     cd $src_diff_path
+-    zh_man_dir="$src_diff_path/man/zh_CN"
++    local zh_man_dir="$src_diff_path/man/zh_CN"
+     man_sections=()
+ 
+-    sections=()
++    local -a sections=()
+     for section in {1..8}; do
+         sections+=($section)
+         sections+=($section"pm")
+@@ -213,17 +331,17 @@
+     
+     # 获取手册节点
+     for section in "${sections[@]}"; do
+-        man_files="${MAN_TMP_PATH}/*.$section"
++        local man_files="${MAN_TMP_PATH}/*.$section"
+         if ls $man_files > /dev/null 2>&1; then
+             mkdir -p "$zh_man_dir/man$(echo "$section" | grep -o '[0-9]\+')"
+             mv $man_files "$zh_man_dir/man$(echo "$section" | grep -o '[0-9]\+')/"
+             man_sections+=($section)
+-            echo "已添加 section $section 的中文手册"
++            log_info "已添加 section $section 的中文手册"
+         fi
+     done
+ 
+     if [ ${#man_sections[@]} -eq 0 ]; then
+-        echo "man_sections 数组为空，删除目录 $src_diff_path 并退出"
++        log_warn "man_sections 数组为空，删除目录 $src_diff_path 并退出"
+         rm -rf $src_diff_path
+         return 1
+     fi
+@@ -231,30 +349,32 @@
+     # 生成补丁
+     cd "$BUILD_DIR"
+     patch_name="cqos-func-add-chinese-man-page.patch"
+-    diff -Nuar "${src_name}" "${src_name}-diff" > "${SOURCES_DIR}/${patch_name}" || true
+-    echo "已生成补丁: ${SOURCES_DIR}/${patch_name}"
++    patch_path="${SOURCES_DIR}/${patch_name}"
++    diff -Nuar "${src_name}" "${src_name}-diff" > "$patch_path" || true
++    log_info "已生成补丁: $patch_path"
+ 
+     # 清理工作目录
+     rm -rf $src_diff_path
+ 
+     ############################## 修改 SPEC 文件 ##############################
+     cd $SPECS_DIR
+-    echo "正在修改 SPEC 文件: $SPEC_FILE ..."
+-    echo "spec 文件修改如下："
++    log_action "正在修改 SPEC 文件: $SPEC_FILE ..."
++    log_info "spec 文件修改如下："
+ 
+     # 获取spec文件中的最后一个patch行，并获取需要添加patch的数字部分
+-    last_patch=$(grep '^Patch[0-9]\+:' $SPEC_FILE | tail -n 1 | sed 's/:.*//' || true)
++    local last_patch=$(grep '^Patch[0-9]\+:' $SPEC_FILE | tail -n 1 | sed 's/:.*//' || true)
++    local new_patch_num
+     if [ -z "$last_patch" ]; then
+         new_patch_num=0
+     else
+-        patch_num=$(echo $last_patch | grep -o '[0-9]\+')
++        local patch_num=$(echo $last_patch | grep -o '[0-9]\+')
+         new_patch_num=$((patch_num + 1))
+     fi
+ 
+     # 添加新的patch行
+-    new_patch="Patch${new_patch_num}:   ${patch_name}"
++    local new_patch="Patch${new_patch_num}:   ${patch_name}"
+     if [ $new_patch_num == 0 ]; then
+-        last_source=$(grep '^Source[0-9]\+:' $SPEC_FILE | tail -n 1 | cut -d':' -f1 || true)
++        local last_source=$(grep '^Source[0-9]\+:' $SPEC_FILE | tail -n 1 | cut -d':' -f1 || true)
+         sed -i "/^$last_source/a$new_patch" $SPEC_FILE
+         echo "$(grep '^Source[0-9]\+:' $SPEC_FILE | tail -n 1)"
+         echo "添加如下"
+@@ -283,17 +403,17 @@
+     fi
+ 
+     # 获取安装命令
+-    install_commands=""
+-    last_index=$((${#man_sections[@]} - 1))
++    local install_commands=""
++    local last_index=$((${#man_sections[@]} - 1))
+ 
+-    man_message="{"
++    local man_message="{"
+     if [ "${man_sections[0]}" = "${man_sections[$last_index]}" ]; then
+         man_message="man$(echo ${man_sections[0]} | grep -o '[0-9]\+')"
+     else
+         for i in "${!man_sections[@]}"; do
+-            section="${man_sections[$i]}"
++            local section="${man_sections[$i]}"
+             # 提取数字部分
+-            number=$(echo "$section" | grep -o '[0-9]\+')
++            local number=$(echo "$section" | grep -o '[0-9]\+')
+             
+             if [ $i -eq $last_index ]; then
+                 # 最后一个元素不添加逗号
+@@ -322,13 +442,13 @@
+ 
+     # 添加 %files 部分
+     # spec 文件中 %{_mandir} 行信息（用于修改spec文件）
+-    mandir_messages=""
++    local -a mandir_messages
+     readarray -t mandir_messages < <(grep '^%{_mandir}' $SPEC_FILE)
+ 
+     # 处理每个 mandir 路径
+     for mandir_message in "${mandir_messages[@]}"; do
+         # 在第一个斜杠后添加 zh_CN/
+-        new_mandir_message="${mandir_message/\//\/zh_CN\/}"
++        local new_mandir_message="${mandir_message/\//\/zh_CN\/}"
+         
+         awk -v old="$mandir_message" -v new="$new_mandir_message" '
+         $0 ~ old && !inserted {print; print new; inserted=1; next}
+@@ -342,14 +462,14 @@
+     done
+ 
+     # 提取 Epoch
+-    epoch=$(grep '^Epoch:' "$SPEC_FILE" | sed 's/^Epoch:\s*//')
++    local epoch=$(grep '^Epoch:' "$SPEC_FILE" | sed 's/^Epoch:\s*//')
+ 
+     # 提取 Version
+-    version=$(grep '^Version:' "$SPEC_FILE" | sed 's/^Version:\s*//')
++    local version=$(grep '^Version:' "$SPEC_FILE" | sed 's/^Version:\s*//')
+ 
+     # 提取 Release
+-    old_release=$(grep '^Release:' "$SPEC_FILE" | sed 's/^Release:\s*//; s/%{?dist}.*//')
+-    new_release=$((old_release + 1)) 
++    local old_release=$(grep '^Release:' "$SPEC_FILE" | sed 's/^Release:\s*//; s/%{?dist}.*//')
++    local new_release=$((old_release + 1)) 
+ 
+     if [ -z "$epoch" ]; then
+         version="$version-$new_release"
+@@ -364,20 +484,19 @@
+     local date=$(LANG=en_US.UTF-8 date '+%a %b %d %Y')
+     local user_name=$(git config --global user.name)
+     local user_email=$(git config --global user.email)
+-    local log=$(read -p "请输入此次更改日志（默认- Add Chinese man manual\n\
+-        - Update the README.md file\n）: " \
++    local log=$(read -e -p "请输入此次更改日志（默认- Add Chinese man manual\n- Update the README.md file\n）: " \
+         && [[ -n "$REPLY" ]] \
+         && echo "$REPLY" \
+         || echo "- Add Chinese man manual\n- Update the README.md file")
+     if [ -z "$user_name" ]; then
+-        user_name=$(read -p "请设置用户名: " && [[ -n "$REPLY" ]] && echo "$REPLY")
++        user_name=$(read -e -p "请设置用户名: " && [[ -n "$REPLY" ]] && echo "$REPLY")
+         git config --global user.name "$user_name"
+     fi
+     if [ -z "$user_email" ]; then
+-        user_email=$(read -p "请设置邮箱: " && [[ -n "$REPLY" ]] && echo "$REPLY")
++        user_email=$(read -e -p "请设置邮箱: " && [[ -n "$REPLY" ]] && echo "$REPLY")
+         git config --global user.email "$user_email"
+     fi
+-    changelog=$(echo "* $date $user_name <$user_email> - $version\n$log")
++    local changelog=$(echo "* $date $user_name <$user_email> - $version\n$log\n")
+     sed -i "/%changelog/a$changelog" "$SPEC_FILE"
+     echo "%changelog"
+     echo "添加如下"
+@@ -385,41 +504,41 @@
+     echo "----------"
+     echo "SPEC 文件修改完成"
+     rm -rf $MAN_TMP_PATH $NEW_SPEC_FILE
++    rm -rf "$SPEC_FILE_BAK" "$MAN_TMP_PATH_BAK"
+ }
+ 
+ # 编译
+ compile() {
+-    echo "正在安装编译依赖..."
++    log_action "正在安装编译依赖..."
+     if ! yum builddep -y $SPEC_FILE; then
+-        echo "安装依赖失败" && exit 1
++        log_error "安装依赖失败"
+     fi
+ 
+     cd $PKG_PATH
+-    echo "开始构建RPM包..."
++    log_action "开始构建RPM包..."
+ 
+-    rpmbuild -ba -D "_topdir `pwd`" $SPEC_FILE || {
+-        echo "错误：RPM构建失败" >&2
+-        exit 1
+-    }
+-	echo "RPM构建成功"
+-	rpmbuild -bp -D "_topdir `pwd`" $SPEC_FILE
++    if ! rpmbuild -ba -D "_topdir `pwd`" $SPEC_FILE; then
++        log_error "错误：RPM构建失败"
++    fi
++    log_info "RPM构建成功"
++    rpmbuild -bp -D "_topdir `pwd`" $SPEC_FILE
+     
+-    echo -e "\n构建结果："
++    log_info -e "\n构建结果："
+     for arch in noarch x86_64; do
+         local arch_dir="$RPM_DIR/$arch"
+-        echo "== $arch =="
++        echo -e "${BLUE}== $arch ==${NC}"
+         if [ "$(ls "$arch_dir" 2>/dev/null)" ]; then
+             for file in "$arch_dir"/*; do
+                 echo "$file"
+                 
+-                rpm_file=$(basename $file)
+-                generated_rpm_pkg=$(echo ${rpm_file%%-[0-9]*})
+-                local_rpm_file=$(rpm -q "$generated_rpm_pkg")
++                local rpm_file=$(basename $file)
++                local generated_rpm_pkg=$(echo ${rpm_file%%-[0-9]*})
++                local local_rpm_file=$(rpm -q "$generated_rpm_pkg")
+                 if [ "$rpm_file" == "$(echo "$local_rpm_file.rpm")" ]; then
+-                    echo "✓ 已安装,正在重新安装..."
++                    log_info "✓ 已安装,正在重新安装..."
+                     yum reinstall -y "$file" &> /dev/null
+                 else
+-                    echo "✗ 未安装，正在安装..."
++                    log_info "✗ 未安装，正在安装..."
+                     dnf install -y "$file" &> /dev/null
+                 fi
+                 rpm -ql "$generated_rpm_pkg" | grep /usr/share/man
+@@ -434,24 +553,26 @@
+ upload() {
+     cd $PKG_PATH
+ 
+-    local branch=$(read -p "请输入要上传的分支（默认：dev）: " && [[ -n "$REPLY" ]] && echo "$REPLY" || echo "dev")
++    local branch=$(read -e -p "请输入要上传的分支（默认：dev）: " && [[ -n "$REPLY" ]] && echo "$REPLY" || echo "dev")
+ 
+     commit_msg_init='"更新(man): 添加中文手册，更新README.md"'
+-    local commit_msg=$(read -p "请输入要提交信息（默认：$commit_msg_init）:  " && [[ -n "$REPLY" ]] && echo "$REPLY" || echo "更新(man): 添加中文手册，更新README.md")
++    local commit_msg=$(read -e -p "请输入要提交信息（默认：$commit_msg_init）:  " && [[ -n "$REPLY" ]] && echo "$REPLY" || echo "更新(man): 添加中文手册，更新README.md")
+ 
+     # 建立分支
+     git branch -M $branch
+ 
+     # 将所有文件进行打包至预发区并说明提交信息
++    log_action "准备提交代码..."
+     git add -A
+     git commit -m "$commit_msg"
+ 
+     # 上传/提交到 mugen 的 $branch 分支中
++    log_action "正在推送代码到远程仓库..."
+     git push -uf origin $branch
+ 
+     # 执行备份（仅当存在RPM文件时）
+     if [ "$(ls -A RPMS 2>/dev/null)" ]; then
+-        echo "创建备份到 ../success/RPMS"
++        log_info "创建备份到 ../success/RPMS"
+         local backup_dir="../success/RPMS"
+         mkdir -p $backup_dir/{noarch,x86_64}
+         
+@@ -465,10 +586,10 @@
+             cp -v $PKG_PATH/RPMS/x86_64/*.rpm "$backup_dir/x86_64/"
+         fi
+     else
+-        echo "警告：未找到RPM文件，跳过备份"
++        log_warn "警告：未找到RPM文件，跳过备份"
+     fi
+ 
+-    echo "操作完成！代码已推送至 $branch 分支"
++    log_info "操作完成！代码已推送至 $branch 分支"
+ }
+ 
+ main() {
+@@ -476,6 +597,12 @@
+     # 初始化全局变量
+     ACTION=""
+     PKG_PATH=""
++    clone_flag=0
++    commit_msg_init=""
++    src_diff_path=""
++    patch_path=""
++    SPEC_FILE_BAK=""
++    MAN_TMP_PATH_BAK=""
+     # 解析命令行参数（支持选项在任意位置）
+     while [[ $# -gt 0 ]]; do
+         case "$1" in
+@@ -501,11 +628,12 @@
+             *)
+                 # 如果参数不是选项，则认为是PKG_PATH
+                 if [[ -z "$PKG_PATH" ]]; then
+-                    PKG_PATH=$1
++                    if ! PKG_PATH="$(realpath -e "$1" 2>/dev/null)"; then
++                        PKG_PATH=$(pwd)/$1
++                        log_info "即将克隆 $PKG_PATH..." 
++                    fi
+                 else
+-                    echo "错误: 重复的路径参数 '$1'" >&2
+-                    show_help
+-                    exit 1
++                    log_error "错误: 重复的路径参数 '$1'"
+                 fi
+                 ;;
+         esac
+@@ -514,26 +642,25 @@
+ 
+     # 检查是否提供了PKG_PATH
+     if [[ -z "$PKG_PATH" ]]; then
+-        echo "错误: 请提供 PKG_PATH" >&2
+-        show_help
+-        exit 1
++        log_error "错误: 请提供 PKG_PATH"
+     fi
+     
+     # 定义目录路径
+     PKG=$(basename $PKG_PATH)
+-    ! echo $PKG_PATH | grep -q "/"  && PKG_PATH="$(pwd)/$PKG" 
+     BUILD_DIR=$PKG_PATH/BUILD
+     SOURCES_DIR=$PKG_PATH/SOURCES
+     SPECS_DIR=$PKG_PATH/SPECS
+     RPM_DIR=$PKG_PATH/RPMS
+     
+     # 检查是否存在 spec 文件，不存在则克隆
+-    ! ls $SPECS_DIR/*.spec &> /dev/null && clone && clone_flag=1 || clone_flag=0
++    if ! ls $SPECS_DIR/*.spec &> /dev/null; then
++        clone
++        clone_flag=1
++    fi
+ 
+     # 检查目录是否存在
+     if [[ ! -d "$PKG_PATH" ]]; then
+-        echo "错误: 目录 '$PKG_PATH' 不存在" >&2
+-        exit 1
++        log_error "错误: 目录 '$PKG_PATH' 不存在"
+     fi
+ 
+     # 定义spec文件路径及展开宏定义后的spec路径
+@@ -543,15 +670,15 @@
+     MAN_TMP_PATH="$SOURCES_DIR/man"
+     
+     # 主流程
+-    echo "==== 开始处理RPM包中文手册页 ===="
+-    echo "PKG_PATH: $PKG_PATH"
+-    echo "操作模式: $ACTION"
+-    echo "================================"
++    log_action "开始处理RPM包中文手册页"
++    log_info "PKG_PATH: $PKG_PATH"
++    log_info "操作模式: $ACTION"
++    log_info "================================"
+ 
+     # 根据选择的操作模式执行相应的功能
+     case "$ACTION" in
+         clone)
+-            [ $clone_flag == 0 ] && clone || echo "刚刚已完成克隆"
++            [ $clone_flag == 0 ] && clone || log_info "刚刚已完成克隆"
+             ;;
+         extract)
+             process_man_files
+@@ -566,13 +693,11 @@
+             upload
+             ;;
+         *)
+-            echo "错误: 未知操作模式 '$ACTION'" >&2
+-            show_help
+-            exit 1
++            log_error "错误: 未知操作模式 '$ACTION'"
+             ;;
+     esac
+ 
+-    echo "==== 所有操作已完成 ===="
++    log_action "所有操作已完成"
+ }
+ 
+ main "$@"
