@@ -1,0 +1,29 @@
+diff -Nuar manproc-1.0.0/manproc manproc-1.0.0-diff/manproc
+--- manproc-1.0.0/manproc	2025-06-26 18:06:39.000000000 +0800
++++ manproc-1.0.0-diff/manproc	2025-06-27 10:30:01.481818258 +0800
+@@ -396,6 +396,12 @@
+     log_action "正在修改 SPEC 文件: $SPEC_FILE ..."
+     log_info "spec 文件修改如下："
+ 
++    # 循环提示直到用户输入非空内容或明确确认
++    while grep -m1 -B9999 '^%changelog' "$SPEC_FILE" | grep -E 'anolis_release|rhel|fedora'; do
++        log_warn "$SPEC_FILE 文件含有无效宏，请删除..."
++        read -e -p "删除无效宏了吗？如已删除请按回车: " reply
++    done
++    
+     # 获取spec文件中的最后一个patch行，并获取需要添加patch的数字部分
+     local last_patch_head=$(grep '^Patch[0-9]\+:' $SPEC_FILE | tail -n 1 | sed 's/:.*//' || true)
+     local last_patch=$(grep '^Patch[0-9]\+:' $SPEC_FILE | tail -n 1 || true)
+@@ -551,12 +557,6 @@
+ 
+ # 编译
+ compile() {      
+-    # 循环提示直到用户输入非空内容或明确确认
+-    while grep -m1 -B9999 '^%changelog' "$SPEC_FILE" | grep -E 'anolis_release|rhel|fedora'; do
+-        log_warn "$SPEC_FILE 文件含有无效宏，请删除..."
+-        read -e -p "删除无效宏了吗？如已删除请按回车: " reply
+-    done
+-
+     log_action "正在安装编译依赖..."
+     if ! yum builddep -y $SPEC_FILE; then
+         log_error "安装依赖失败"
